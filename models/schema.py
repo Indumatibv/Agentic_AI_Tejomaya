@@ -23,6 +23,26 @@ class Announcement(BaseModel):
         ...,
         description="The date the circular was issued, in YYYY-MM-DD format.",
     )
+    detail_url: Optional[str] = Field(
+        default=None,
+        description="The URL to the intermediate detail page for this announcement.",
+    )
+    pdf_url: Optional[str] = Field(
+        default=None,
+        description="The direct download URL for the PDF.",
+    )
+    local_path: Optional[str] = Field(
+        default=None,
+        description="The absolute local path where the PDF is stored.",
+    )
+    file_name: Optional[str] = Field(
+        default=None,
+        description="The name of the downloaded PDF file.",
+    )
+    category: Optional[str] = Field(
+        default=None,
+        description="The remapped vertical/category (e.g. SEBI or AIF).",
+    )
     confidence: float = Field(
         default=1.0,
         ge=0.0,

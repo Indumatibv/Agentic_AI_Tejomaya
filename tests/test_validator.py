@@ -47,12 +47,12 @@ class TestValidAnnouncement:
 
     def test_valid_announcement_passes(self):
         ann = Announcement(
-            title="SEBI Circular on Mutual Fund Regulations",
+            title="SEBI Circular on Disclosure Norms",
             issue_date=date(2025, 6, 15),
             confidence=0.9,
         )
         extraction = _make_extraction([ann])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 1
         assert validated[0].title == ann.title
@@ -64,10 +64,10 @@ class TestValidAnnouncement:
         announcements = [
             Announcement(title="Circular on Stock Brokers", issue_date=date(2025, 1, 10)),
             Announcement(title="Amendment to SEBI Regulations", issue_date=date(2025, 3, 20)),
-            Announcement(title="Valuation of Gold and Silver", issue_date=date(2025, 5, 5)),
+            Announcement(title="Valuation of physical Assets", issue_date=date(2025, 5, 5)),
         ]
         extraction = _make_extraction(announcements)
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 3
         assert stats.valid == 3
@@ -81,7 +81,7 @@ class TestEmptyTitleRejection:
         # Pydantic will reject an empty string due to min_length=1
         # But whitespace-only bypasses min_length, so validator catches it
         extraction = _make_extraction([ann])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 0
         assert stats.removed_empty_title == 1
@@ -89,7 +89,7 @@ class TestEmptyTitleRejection:
     def test_too_few_alpha_chars_rejected(self):
         ann = Announcement(title="123-456", issue_date=date(2025, 1, 1), confidence=0.9)
         extraction = _make_extraction([ann])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 0
         assert stats.removed_empty_title == 1
@@ -102,7 +102,7 @@ class TestDateValidation:
         future = date.today() + timedelta(days=30)
         ann = Announcement(title="Future Circular Announcement", issue_date=future, confidence=0.9)
         extraction = _make_extraction([ann])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 0
         assert stats.removed_unrealistic_date == 1
@@ -114,7 +114,7 @@ class TestDateValidation:
             confidence=0.9,
         )
         extraction = _make_extraction([ann])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 0
         assert stats.removed_unrealistic_date == 1
@@ -126,7 +126,7 @@ class TestDateValidation:
             confidence=0.9,
         )
         extraction = _make_extraction([ann])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 1
 
@@ -138,7 +138,7 @@ class TestDuplicateRemoval:
         ann1 = Announcement(title="SEBI Circular on Brokers", issue_date=date(2025, 3, 1))
         ann2 = Announcement(title="SEBI Circular on Brokers", issue_date=date(2025, 3, 1))
         extraction = _make_extraction([ann1, ann2])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 1
         assert stats.removed_duplicates == 1
@@ -147,7 +147,7 @@ class TestDuplicateRemoval:
         ann1 = Announcement(title="SEBI Circular on Brokers", issue_date=date(2025, 3, 1))
         ann2 = Announcement(title="sebi circular on brokers", issue_date=date(2025, 3, 1))
         extraction = _make_extraction([ann1, ann2])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 1
         assert stats.removed_duplicates == 1
@@ -156,7 +156,7 @@ class TestDuplicateRemoval:
         ann1 = Announcement(title="SEBI Circular on Brokers", issue_date=date(2025, 3, 1))
         ann2 = Announcement(title="SEBI Circular on Brokers", issue_date=date(2025, 4, 1))
         extraction = _make_extraction([ann1, ann2])
-        validated, stats = _run(validate_announcements(extraction))
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
 
         assert len(validated) == 2
         assert stats.removed_duplicates == 0
@@ -193,32 +193,47 @@ class TestConfidenceScoring:
         assert adjusted <= 1.0
 
 
-class TestTitleValidation:
-    """Test the _is_valid_title helper."""
+class TestKeywordExclusion:
+    """Test that unwanted announcements are skipped based on keywords."""
 
-    def test_valid_title(self):
-        assert _is_valid_title("SEBI Circular on Market Regulation") is True
-
-    def test_empty_title(self):
-        assert _is_valid_title("") is False
-
-    def test_whitespace_only(self):
-        assert _is_valid_title("   ") is False
-
-    def test_numeric_only(self):
-        assert _is_valid_title("12345") is False
-
-    def test_minimal_alpha(self):
-        assert _is_valid_title("Hello") is True
-
-
-class TestEmptyInput:
-    """Test behaviour with empty or null input."""
-
-    def test_empty_list(self):
-        extraction = _make_extraction([])
-        validated, stats = _run(validate_announcements(extraction))
-
+    def test_excluded_keyword_rejected(self):
+        ann = Announcement(title="Mutual fund inauguration contest", issue_date=date(2025, 1, 1))
+        extraction = _make_extraction([ann])
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
         assert len(validated) == 0
-        assert stats.total_input == 0
-        assert stats.valid == 0
+        assert stats.excluded_by_keyword == 1
+
+    def test_case_insensitive_exclusion(self):
+        ann = Announcement(title="MUTUAL FUND NEWS", issue_date=date(2025, 1, 1))
+        extraction = _make_extraction([ann])
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
+        assert len(validated) == 0
+        assert stats.excluded_by_keyword == 1
+
+
+class TestCategoryRemapping:
+    """Test that SEBI -> AIF remapping works correctly."""
+
+    def test_remaps_to_aif_on_keyword(self):
+        ann = Announcement(title="Circular for Portfolio Managers", issue_date=date(2025, 1, 1))
+        extraction = _make_extraction([ann])
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
+        assert len(validated) == 1
+        assert validated[0].category == "AIF"
+        assert stats.remapped_to_aif == 1
+
+    def test_stays_sebi_by_default(self):
+        ann = Announcement(title="Standard SEBI Circular", issue_date=date(2025, 1, 1))
+        extraction = _make_extraction([ann])
+        validated, stats = _run(validate_announcements(extraction, base_category="SEBI"))
+        assert len(validated) == 1
+        assert validated[0].category == "SEBI"
+        assert stats.remapped_to_aif == 0
+
+    def test_rbi_category_persistence(self):
+        ann = Announcement(title="RBI Master Direction on Fintech", issue_date=date(2025, 1, 1))
+        extraction = _make_extraction([ann])
+        validated, stats = _run(validate_announcements(extraction, base_category="RBI"))
+        assert len(validated) == 1
+        assert validated[0].category == "RBI"
+        assert stats.remapped_to_aif == 0

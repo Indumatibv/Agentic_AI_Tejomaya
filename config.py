@@ -29,9 +29,9 @@ VISION_DEPLOYMENT: str = os.getenv("VISION_DEPLOYMENT", "gpt-4.1-mini")
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 
 # --- Target URL ---
-SEBI_URL: str = os.getenv(
-    "SEBI_URL",
-    "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=1&ssid=7&smid=0",
+URL_of_domain: str = os.getenv(
+    "URL_of_domain",
+    "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=2&ssid=10&smid=0",
 )
 
 # --- Browser Settings ---
@@ -43,10 +43,21 @@ NETWORK_IDLE_TIMEOUT_MS: int = int(os.getenv("NETWORK_IDLE_TIMEOUT_MS", "30000")
 MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_DELAY_SECONDS: float = float(os.getenv("RETRY_DELAY_SECONDS", "2.0"))
 
-# --- Output ---
+# Where PDFs should be stored
+DEFAULT_PDF_BASE: Path = Path.home() / "Downloads" / "Tejomaya_pdfs_test" / "Akshayam Data"
+PDF_BASE_DIR: Path = Path(os.getenv("PDF_BASE_DIR", str(DEFAULT_PDF_BASE)))
+PDF_BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- Paths ---
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
 OUTPUT_DIR: Path = PROJECT_ROOT / os.getenv("OUTPUT_DIR", "output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+DATA_DIR: Path = PROJECT_ROOT / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+LINKS_EXCEL: Path = DATA_DIR / "Links.xlsx"
+FINAL_EXCEL_OUTPUT: Path = DATA_DIR / "Searching_agent_output.xlsx"
 
 # --- Logging ---
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -58,3 +69,29 @@ LOG_FORMAT: str = os.getenv(
 # --- Validation ---
 MIN_ANNOUNCEMENT_YEAR: int = int(os.getenv("MIN_ANNOUNCEMENT_YEAR", "1992"))  # SEBI founded
 MAX_HTML_CHARS_FOR_LLM: int = int(os.getenv("MAX_HTML_CHARS_FOR_LLM", "60000"))
+
+# --- Scraping Window ---
+# 0 = Current week (Mon-Now), 1 = Last week (Prev Mon - Prev Sun), etc.
+WEEKS_BACK: int = int(os.getenv("WEEKS_BACK", "3"))
+
+# --- Keyword Exclusions ---
+EXCLUDED_KEYWORDS: list[str] = [
+    "Mutual fund", "Mutual funds", "KRAs", "CRAs", "Niveshak Shivir", 
+    "inauguration", "survey", "Minicipal Bond", "Municipal Bond",
+    "contest", "campaign", "annual report", 
+    "newspaper advertisement"
+]
+
+# --- Category Mappings (Verticals) ---
+# If SEBI title contains these, change category from SEBI to AIF
+AIF_KEYWORDS: list[str] = [
+    "Portfolio Managers",
+    "Angel investors", "Angel funds",
+    "Infrastructure Investment Trust", "InviTs",
+    "Real Estate Investment Trusts", "ReiTs",
+    "Research Analyst",
+    "Investment Advisors",
+    "Alternative Investment Trusts",
+    "Alternative Investment Funds",
+    "AIF"
+]

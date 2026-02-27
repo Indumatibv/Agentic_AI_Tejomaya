@@ -1,161 +1,118 @@
-"""
-CLI entrypoint for the SEBI Agentic Scraper.
-
-Usage:
-    python main.py
-
-The scraper will:
-1. Load the SEBI circulars page using Playwright
-2. Inspect network traffic for backend JSON APIs
-3. Extract announcements using LLM-powered semantic analysis
-4. Validate and deduplicate results
-5. Output a formatted table and save JSON to output/announcements.json
-"""
-
 import asyncio
-import json
 import logging
 import sys
 from datetime import date
-from pathlib import Path
+from typing import List, Dict
 
-from config import SEBI_URL, LOG_LEVEL, LOG_FORMAT, OUTPUT_DIR, AZURE_OPENAI_KEY
+from config import AZURE_OPENAI_KEY, LINKS_EXCEL, URL_of_domain, FINAL_EXCEL_OUTPUT
 from graph import compile_scraper, ScraperState
-
+from tools.excel_manager import load_link_tasks_from_excel, save_announcements_to_excel
 
 def setup_logging() -> None:
-    """Configure structured logging for the entire application."""
+    """Configure structured logging."""
+    from config import LOG_LEVEL, LOG_FORMAT
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
         format=LOG_FORMAT,
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
-    # Reduce noise from third-party libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("playwright").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
 
-
-def print_results_table(announcements: list[dict]) -> None:
-    """Print announcements in a formatted table to stdout."""
-    if not announcements:
-        print("\n⚠️  No announcements extracted.")
-        return
-
-    # Header
-    print("\n" + "=" * 100)
-    print(f"{'No.':<5} {'Issue Date':<14} {'Conf.':<7} {'Title'}")
-    print("-" * 100)
-
-    for i, ann in enumerate(announcements, 1):
-        issue_date = ann.get("issue_date", "N/A")
-        if isinstance(issue_date, date):
-            issue_date = issue_date.isoformat()
-        confidence = ann.get("confidence", 0.0)
-        title = ann.get("title", "N/A")
-
-        # Truncate title for display
-        display_title = title[:70] + "..." if len(title) > 70 else title
-        print(f"{i:<5} {issue_date:<14} {confidence:<7.2f} {display_title}")
-
-    print("=" * 100)
-    print(f"Total: {len(announcements)} announcements\n")
-
-
-async def run_scraper() -> int:
+async def run_multi_source_scraper():
     """
-    Execute the full scraper pipeline and return an exit code.
-
-    Returns:
-        0: Success (announcements extracted)
-        1: Partial success (some announcements, with errors)
-        2: Failure (no announcements extracted)
+    Main loop for multi-source scraping.
     """
     logger = logging.getLogger(__name__)
 
-    # Validate API key
     if not AZURE_OPENAI_KEY:
-        logger.error(
-            "AZURE_OPENAI_KEY is not set. "
-            "Set it via environment variable or .env file."
-        )
-        print("\n❌ Error: AZURE_OPENAI_KEY is not configured.")
-        print("   Set it via: export AZURE_OPENAI_KEY='your-key-here'")
-        print("   Or create a .env file in the project root.\n")
-        return 2
+        logger.error("AZURE_OPENAI_KEY not found. Please check your .env file.")
+        return
 
-    logger.info("=" * 60)
-    logger.info("SEBI Agentic Scraper — Starting")
-    logger.info("Target URL: %s", SEBI_URL)
-    logger.info("Output dir: %s", OUTPUT_DIR)
-    logger.info("=" * 60)
+    # 1. Default task (skipping Excel loading as requested)
+    tasks = [{"category": "SEBI", "subfolder": "Consultation Paper", "url": URL_of_domain}]
+    logger.info("Using default task with URL: %s", URL_of_domain)
 
-    try:
-        # Compile and invoke the LangGraph pipeline
-        scraper = compile_scraper()
-        initial_state = ScraperState(url=SEBI_URL)
+    # 2. Setup graph
+    scraper = compile_scraper()
+    all_results: List[Dict] = []
 
-        logger.info("Invoking scraper graph...")
-        final_state = await scraper.ainvoke(initial_state.model_dump())
+    logger.info("Starting batch processing of %d tasks...", len(tasks))
 
-        # Extract results
-        announcements = final_state.get("validated_announcements", [])
-        errors = final_state.get("errors", [])
-        strategy = final_state.get("strategy_used", "unknown")
-        output_path = final_state.get("output_path")
-        stats = final_state.get("validation_stats", {})
+    # 3. Process each task
+    for i, task in enumerate(tasks, 1):
+        category = task["category"]
+        subfolder = task["subfolder"]
+        url = task["url"]
 
-        # Print results
-        print_results_table(announcements)
+        logger.info("-" * 60)
+        logger.info("TASK %d/%d: [%s] -> [%s]", i, len(tasks), category, subfolder)
+        logger.info("URL: %s", url)
+        logger.info("-" * 60)
 
-        # Print metadata
-        print(f"📊 Strategy used: {strategy}")
-        if stats:
-            print(
-                f"📋 Validation: {stats.get('valid', 0)}/{stats.get('total_input', 0)} passed"
+        try:
+            # Prepare initial state
+            initial_state = ScraperState(
+                url=url,
+                category=category,
+                subfolder=subfolder
             )
-        if output_path:
-            print(f"💾 JSON saved to: {output_path}")
 
-        if errors:
-            print(f"\n⚠️  Errors encountered ({len(errors)}):")
-            for err in errors:
-                print(f"   • {err}")
+            # Invoke graph
+            final_state = await scraper.ainvoke(initial_state.model_dump())
+            
+            # Collect results
+            new_announcements = final_state.get("validated_announcements", [])
+            downloaded = final_state.get("downloaded_count", 0)
+            
+            logger.info("Extracted %d valid announcements", len(new_announcements))
+            logger.info("PDFs downloaded successfully: %d", downloaded)
+            
+            for ann_obj in new_announcements:
+                # Convert Pydantic object to dict for processing/saving
+                ann = ann_obj.model_dump()
+                
+                # Ensure category and subfolder are set
+                ann["category"] = ann.get("category") or category
+                ann["subfolder"] = ann.get("subfolder") or subfolder
+                
+                issue_date = ann.get("issue_date")
+                dt = None
+                if isinstance(issue_date, date):
+                    dt = issue_date
+                elif isinstance(issue_date, str):
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(issue_date).date()
+                    except:
+                        pass
+                
+                if dt:
+                    ann["year"] = dt.year
+                    ann["month"] = dt.strftime("%B")
+                
+                all_results.append(ann)
 
-        # Determine exit code
-        if announcements and not errors:
-            logger.info("Scraper completed successfully (%d announcements)", len(announcements))
-            return 0
-        elif announcements:
-            logger.warning(
-                "Scraper completed with warnings (%d announcements, %d errors)",
-                len(announcements),
-                len(errors),
-            )
-            return 1
-        else:
-            logger.error("Scraper failed — no announcements extracted")
-            return 2
+        except Exception as exc:
+            logger.error("Failed to process task %s: %s", url, exc)
 
-    except KeyboardInterrupt:
-        logger.info("Scraper interrupted by user")
-        return 2
-    except Exception as exc:
-        logger.exception("Unhandled exception: %s", exc)
-        print(f"\n❌ Fatal error: {exc}")
-        return 2
-
+    # 4. Final Save
+    logger.info("=" * 60)
+    logger.info("SCRAPING COMPLETE: %d total announcements found.", len(all_results))
+    save_announcements_to_excel(all_results, FINAL_EXCEL_OUTPUT)
+    logger.info("Excel results saved to: %s", FINAL_EXCEL_OUTPUT)
+    logger.info("=" * 60)
 
 def main() -> None:
-    """Main entrypoint — sets up logging and runs the async scraper."""
     setup_logging()
-    exit_code = asyncio.run(run_scraper())
-    sys.exit(exit_code)
-
+    try:
+        asyncio.run(run_multi_source_scraper())
+    except KeyboardInterrupt:
+        print("\nScraper stopped by user.")
+    except Exception as exc:
+        print(f"\nFatal error: {exc}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

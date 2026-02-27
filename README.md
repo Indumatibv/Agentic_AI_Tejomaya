@@ -21,12 +21,16 @@ A self-healing, LLM-powered agent system that extracts circulars from the [SEBI 
        │ ◄── retry / screenshot fallback on failure
        ▼
 ┌──────────────┐
-│  Validator   │  Date checks, dedup, confidence scoring
-│  Agent       │
+│  Validator   │  Date checks, dedup, keyword-based filtering
+│  Agent       │  (remaps SEBI -> AIF dynamic folders)
 └──────┬───────┘
        ▼
 ┌──────────────┐
-│  Output      │  JSON file + formatted table
+│ PDF Downloader│  Downloads matching PDFs into structured folders
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ Excel Report │  Generates formatted .xlsx metadata report
 └──────────────┘
 ```
 
@@ -61,18 +65,23 @@ cp .env.example .env
 python main.py
 ```
 
-Results are printed as a table and saved to `output/announcements.json`.
+Results are saved to:
+- `data/Searching_agent_output.xlsx` (Aggregated Excel report)
+- `Downloads/Tejomaya_pdfs_test/...` (Downloaded PDFs)
+- `output/announcements.json` (Raw JSON for downstream systems)
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | (required) | OpenAI API key |
-| `LLM_MODEL` | `gpt-4o-mini` | Model for text extraction |
-| `VISION_MODEL` | `gpt-4o` | Model for screenshot fallback |
+| `WEEKS_BACK` | `0` | Date window (0=Current week, 1=Last week, 2=Prev week) |
+| `EXCLUDED_KEYWORDS`| (list in config) | Skips items with keywords like "Mutual fund", "CRA" |
+| `AIF_KEYWORDS` | (list in config) | Remaps category to AIF and saves to AIF folder |
+| `PDF_BASE_DIR` | `~/Downloads/...`| Custom PDF storage location |
 | `HEADLESS` | `true` | Run browser headless |
 | `MAX_RETRIES` | `3` | Max retry attempts |
-| `PAGE_TIMEOUT_MS` | `60000` | Page load timeout (ms) |
+| `PAGE_TIMEOUT_MS`| `60000` | Page load timeout (ms) |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 
 ## Project Structure

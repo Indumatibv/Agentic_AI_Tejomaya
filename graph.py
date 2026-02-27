@@ -9,7 +9,8 @@ With conditional retry logic and screenshot fallback on failure.
 
 import json
 import logging
-from datetime import date
+import re
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -26,7 +27,17 @@ from agents.extractor_agent import (
     extract_from_screenshot,
 )
 from agents.validator_agent import validate_announcements, ValidationStats
-from config import SEBI_URL, MAX_RETRIES, OUTPUT_DIR
+from tools.downloader import extract_pdf_url_from_detail_page, download_pdf, get_structured_path
+from config import (
+    URL_of_domain,
+    MAX_RETRIES,
+    OUTPUT_DIR,
+    PDF_BASE_DIR,
+    RETRY_DELAY_SECONDS,
+    WEEKS_BACK,
+    EXCLUDED_KEYWORDS,
+    AIF_KEYWORDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +47,14 @@ logger = logging.getLogger(__name__)
 class ScraperState(BaseModel):
     """Shared state flowing through the LangGraph nodes."""
 
-    url: str = Field(default=SEBI_URL)
+    url: str = Field(default=URL_of_domain)
     html: Optional[str] = Field(default=None)
     network_result: Optional[dict] = Field(default=None)
     extraction_result: Optional[dict] = Field(default=None)
-    validated_announcements: list[dict] = Field(default_factory=list)
+    validated_announcements: list[Announcement] = Field(default_factory=list)
+    category: str
+    subfolder: str
+    downloaded_count: int = Field(default=0)
     validation_stats: Optional[dict] = Field(default=None)
     retry_count: int = Field(default=0)
     errors: list[str] = Field(default_factory=list)
@@ -130,29 +144,65 @@ async def extractor_node(state: ScraperState) -> dict:
 
 
 async def validator_node(state: ScraperState) -> dict:
-    """Validate and clean extracted announcements."""
+    """Validate extracted announcements and filter by date window."""
     logger.info("═══ VALIDATOR NODE ═══")
-
-    if not state.extraction_result or not state.extraction_result.get("announcements"):
-        logger.warning("No announcements to validate")
-        return {
-            "validated_announcements": [],
-            "validation_stats": {"total_input": 0, "valid": 0},
-        }
-
-    extraction = ExtractionResult(**state.extraction_result)
-    validated, stats = await validate_announcements(extraction)
-
+    
+    extraction_dict = state.extraction_result
+    if not extraction_dict:
+        return {"errors": ["No extraction result to validate"]}
+    
+    # 1. Re-parse into Pydantic model for clean logic
+    extraction = ExtractionResult(**extraction_dict)
+    
+    # 2. Run core validation (Exclusions, Remapping, Scoring, Dedup)
+    validated, stats_obj = await validate_announcements(extraction, base_category=state.category)
+    
+    # 3. Apply Date Window Filtering (Manual sync with WEEKS_BACK)
+    today = date.today()
+    weekday = today.weekday()
+    this_monday = today - timedelta(days=weekday)
+    
+    if WEEKS_BACK == 0:
+        start_date = this_monday
+        end_date = today
+    else:
+        start_date = this_monday - timedelta(weeks=WEEKS_BACK)
+        end_date = start_date + timedelta(days=6)
+        
+    logger.info("Scraping window: %s to %s", start_date, end_date)
+    
+    final_announcements = []
+    out_of_window = 0
+    
+    for ann in validated:
+        if ann.issue_date < start_date or ann.issue_date > end_date:
+            out_of_window += 1
+            continue
+        
+        # Ensure subfolder is set (from state)
+        ann.category = ann.category or state.category
+        final_announcements.append(ann)
+        
+    logger.info(
+        "Validation complete: %d/25 passed | window_out=%d, %s",
+        len(final_announcements), 
+        out_of_window,
+        stats_obj.summary()
+    )
+    
+    # Convert stats to dict for state
+    stats_dict = {
+        "total": len(extraction.announcements),
+        "valid": len(final_announcements),
+        "out_of_window": out_of_window,
+        "excluded": stats_obj.excluded_by_keyword,
+        "remapped": stats_obj.remapped_to_aif,
+        "duplicates": stats_obj.removed_duplicates
+    }
+    
     return {
-        "validated_announcements": [a.model_dump() for a in validated],
-        "validation_stats": {
-            "total_input": stats.total_input,
-            "valid": stats.valid,
-            "removed_empty_title": stats.removed_empty_title,
-            "removed_invalid_date": stats.removed_invalid_date,
-            "removed_unrealistic_date": stats.removed_unrealistic_date,
-            "removed_duplicates": stats.removed_duplicates,
-        },
+        "validated_announcements": final_announcements,
+        "validation_stats": stats_dict
     }
 
 
@@ -166,7 +216,7 @@ async def output_node(state: ScraperState) -> dict:
     # Serialise dates as strings for JSON
     serialisable = []
     for ann in announcements:
-        entry = dict(ann)
+        entry = ann.model_dump()
         if isinstance(entry.get("issue_date"), date):
             entry["issue_date"] = entry["issue_date"].isoformat()
         serialisable.append(entry)
@@ -179,6 +229,50 @@ async def output_node(state: ScraperState) -> dict:
     logger.info("Results saved to: %s", output_path)
 
     return {"output_path": str(output_path)}
+
+
+async def pdf_downloader_node(state: ScraperState) -> dict:
+    """Download PDFs for each validated announcement."""
+    logger.info("═══ PDF DOWNLOADER NODE ═══")
+    
+    announcements = state.validated_announcements
+    downloaded = 0
+    updated_announcements = []
+    
+    # Process all announcements matching the period
+    for ann in announcements:
+        detail_url = ann.detail_url
+        if not detail_url:
+            updated_announcements.append(ann)
+            continue
+            
+        # 1. Extract PDF URL
+        pdf_url = await extract_pdf_url_from_detail_page(detail_url)
+        if pdf_url:
+            ann.pdf_url = pdf_url
+            
+            # 2. Determine folder structure
+            issue_date = ann.issue_date
+            ann_category = ann.category or state.category
+            save_dir = get_structured_path(PDF_BASE_DIR, ann_category, state.subfolder, issue_date)
+            
+            # 3. Download PDF
+            # Clean filename: replace spaces/special chars with underscores
+            clean_title = re.sub(r'[^\w\s-]', '', ann.title or "document").strip().replace(' ', '_')
+            filename = f"{clean_title[:100]}"
+            
+            local_path = await download_pdf(pdf_url, save_dir, filename)
+            if local_path:
+                ann.local_path = str(local_path)
+                ann.file_name = f"{filename}.pdf"
+                downloaded += 1
+                
+        updated_announcements.append(ann)
+        
+    return {
+        "validated_announcements": updated_announcements,
+        "downloaded_count": downloaded
+    }
 
 
 async def screenshot_fallback_node(state: ScraperState) -> dict:
@@ -258,6 +352,7 @@ def build_scraper_graph() -> StateGraph:
     graph.add_node("validator", validator_node)
     graph.add_node("output", output_node)
     graph.add_node("screenshot_fallback", screenshot_fallback_node)
+    graph.add_node("pdf_downloader", pdf_downloader_node)
 
     # Linear edges
     graph.add_edge("loader", "network_inspector")
@@ -285,7 +380,8 @@ def build_scraper_graph() -> StateGraph:
     )
 
     # Linear edges to finish
-    graph.add_edge("validator", "output")
+    graph.add_edge("validator", "pdf_downloader")
+    graph.add_edge("pdf_downloader", "output")
     graph.add_edge("output", END)
 
     # Entry point

@@ -40,8 +40,7 @@ IMPORTANT RULES:
 - Do NOT rely on CSS class names or specific HTML attributes.
 - Instead, look for SEMANTIC PATTERNS — repeating blocks of content that
   represent individual announcements or circulars.
-- Each announcement typically has a TITLE (a descriptive text or link label)
-  and an ISSUE DATE (a date in various formats like DD Mon YYYY, YYYY-MM-DD, etc.).
+- Each announcement typically has a TITLE (a descriptive text or link label), an ISSUE DATE, and a DETAIL URL (the link associated with the title).
 - Extract ALL announcements visible on the page.
 - Dates should be normalised to YYYY-MM-DD format.
 - Assign a confidence score between 0.0 and 1.0 to each extraction.
@@ -54,7 +53,8 @@ Identify all repeating announcement / circular entries on the page.
 For each entry, extract:
 1. title — the full announcement title text
 2. issue_date — the date it was issued (normalise to YYYY-MM-DD)
-3. confidence — your confidence in the accuracy of the extraction (0.0 – 1.0)
+3. detail_url — the URL link associated with the title/announcement
+4. confidence — your confidence in the accuracy of the extraction (0.0 – 1.0)
 
 The HTML content:
 ---
@@ -69,7 +69,8 @@ Exchange Board of India) circulars listing page.
 Identify all visible announcement entries. For each, extract:
 1. title — the full announcement title
 2. issue_date — the issue date (normalise to YYYY-MM-DD)
-3. confidence — your confidence in this extraction (0.0 – 1.0)
+3. detail_url — the URL link if visible (ocr from background if possible)
+4. confidence — your confidence in this extraction (0.0 – 1.0)
 
 Return structured JSON matching the schema provided."""
 
@@ -178,11 +179,17 @@ def extract_from_api(api_data: list | dict) -> ExtractionResult:
         try:
             title = _extract_field(item, ["title", "name", "subject", "heading", "circular_name"])
             date_str = _extract_field(item, ["date", "issue_date", "issuedate", "publish_date", "circular_date"])
+            detail_url = _extract_field(item, ["url", "link", "detail_url", "href"])
             if title and date_str:
                 issue_date = _parse_date(date_str)
                 if issue_date:
                     announcements.append(
-                        Announcement(title=title, issue_date=issue_date, confidence=0.95)
+                        Announcement(
+                            title=title,
+                            issue_date=issue_date,
+                            detail_url=detail_url,
+                            confidence=0.95
+                        )
                     )
         except Exception as exc:
             logger.debug("Skipping API item: %s", exc)

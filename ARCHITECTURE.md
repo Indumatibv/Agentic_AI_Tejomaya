@@ -43,7 +43,7 @@ new class names, different layout, table → cards — the LLM adapts automatica
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        graph.py (LangGraph)                         │
-│  Orchestrates the pipeline as a state machine with 6 nodes          │
+│  Orchestrates the pipeline as a state machine with 7 nodes          │
 │                                                                     │
 │  ┌──────────┐  ┌───────────────┐  ┌───────────┐  ┌───────────┐     │
 │  │  Loader   │→│   Network     │→│ Extractor  │→│ Validator  │     │
@@ -51,8 +51,13 @@ new class names, different layout, table → cards — the LLM adapts automatica
 │  └──────────┘  └───────────────┘  └─────┬─────┘  └─────┬─────┘     │
 │                                         │               │           │
 │                                    [retry/fallback]     ▼           │
-│                                         │         ┌──────────┐      │
-│                                         └────────→│  Output  │      │
+│                                         │         ┌────────────┐    │
+│                                         └────────→│ Downloader │    │
+│                                                   │   Node     │    │
+│                                                   └─────┬──────┘    │
+│                                                         ▼           │
+│                                                   ┌──────────┐      │
+│                                                   │  Output  │      │
 │                                                   │   Node   │      │
 │                                                   └──────────┘      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -207,31 +212,38 @@ This is what actually runs on the SEBI site:
 
 ```
 Input:  state.extraction_result.announcements (25 raw items)
-Output: state.validated_announcements (25 clean items), state.validation_stats
+Output: state.validated_announcements (filtered list), state.validation_stats
 ```
 
-**Validation checks:**
+**Validation & Semantic Checks:**
 
 | Check | Rule | Example |
 |---|---|---|
-| Title validity | Must have ≥5 alphabetic characters | `"123-456"` → rejected |
-| Date realism | Must be between 1992 (SEBI founded) and today+3 days | `1980-01-01` → rejected |
-| Duplicate removal | Case-insensitive title + same date = duplicate | Keeps first occurrence |
-| Confidence scoring | Boosted for regulatory keywords, penalized for short titles | `"SEBI Circular..."` → boosted |
+| Date Window | Filters based on `WEEKS_BACK` | `WEEKS_BACK=0` → Feb 23 onward |
+| Keyword Exclusion | Skips junk if title contains forbidden words | "Mutual Funds" → **Skipped** |
+| Category Remapping| Remaps "SEBI" → "AIF" for specific keywords| "Portfolio Managers" → **AIF** |
+| Duplicate removal | Case-insensitive title + same date = duplicate | Keeps unique items |
+| Content Accuracy | Formats `IssueDate` to DD-MM-YYYY | `2026-02-27` → `27-02-2026` |
 
 ---
 
-### Node 5: Output (`output_node`)
-**Purpose:** Save results and format for display
+### Node 5: PDF Downloader (`pdf_downloader_node`)
+**File:** `tools/downloader.py`
+**Purpose:** Fetch the actual PDF for every validated announcement
 
-```
-Input:  state.validated_announcements
-Output: state.output_path = "output/announcements.json"
-```
+1. Iterates through all `validated_announcements`
+2. Follows the `detail_url` to find the direct PDF link
+3. Calculates path using the **Remapped Category** (e.g., SEBI or AIF)
+4. Downloads and saves at `.../Category/Subfolder/Year/Month/Title.pdf`
+5. Ensures **Robust Overwriting**: Deletes existing PDFs before downloading
 
-1. Serialises dates as ISO strings
-2. Writes JSON to `output/announcements.json`
-3. `main.py` then prints a formatted table to stdout
+### Node 6: Output (`output_node`)
+**File:** `tools/excel_manager.py`
+**Purpose:** Save results to Excel and aggregated systems
+
+1. Filters announcements to **Downloaded Only**
+2. Explicitly overwrites `Searching_agent_output.xlsx` (full refresh)
+3. Formats metadata exactly as required for the Akshayam ETL.
 
 ---
 
@@ -393,27 +405,29 @@ graph TD
     C -->|"node 2"| E["network_inspector_node"]
     C -->|"node 3"| F["extractor_node"]
     C -->|"node 4"| G["validator_node"]
-    C -->|"node 5"| H["output_node"]
-    C -->|"node 6"| I["screenshot_fallback_node"]
+    C -->|"node 5"| H["pdf_downloader_node"]
+    C -->|"node 6"| I["output_node"]
+    C -->|"node 7"| J["screenshot_fallback_node"]
 
-    D -->|"uses"| J["tools/browser.py"]
-    E -->|"uses"| K["tools/network_inspector.py"]
-    F -->|"uses"| L["agents/extractor_agent.py"]
-    I -->|"uses"| M["tools/screenshot.py"]
-    I -->|"uses"| L
+    D -->|"uses"| K["tools/browser.py"]
+    E -->|"uses"| L["tools/network_inspector.py"]
+    F -->|"uses"| M["agents/extractor_agent.py"]
     G -->|"uses"| N["agents/validator_agent.py"]
+    H -->|"uses"| O["tools/downloader.py"]
+    I -->|"uses"| P["tools/excel_manager.py"]
+    J -->|"uses"| Q["tools/screenshot.py"]
 
-    L -->|"calls"| O["Azure OpenAI API"]
-    J -->|"calls"| P["Playwright Chromium"]
-    K -->|"calls"| P
-    M -->|"calls"| P
+    M -->|"calls"| R["Azure OpenAI API"]
+    K -->|"calls"| S["Playwright Chromium"]
+    L -->|"calls"| S
+    Q -->|"calls"| S
 
-    L -->|"validates with"| Q["models/schema.py"]
-    N -->|"validates with"| Q
+    M -->|"validates with"| T["models/schema.py"]
+    N -->|"validates with"| T
 
-    style O fill:#4a9eff,color:#fff
-    style P fill:#2ecc71,color:#fff
-    style Q fill:#e74c3c,color:#fff
+    style R fill:#4a9eff,color:#fff
+    style S fill:#2ecc71,color:#fff
+    style T fill:#e74c3c,color:#fff
 ```
 
 This is a **true agentic system** — the LLM is not just a utility function, it's the

@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from models.schema import Announcement, ExtractionResult
-from config import MIN_ANNOUNCEMENT_YEAR
+from config import MIN_ANNOUNCEMENT_YEAR, EXCLUDED_KEYWORDS, AIF_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +28,22 @@ class ValidationStats:
         self.removed_invalid_date: int = 0
         self.removed_duplicates: int = 0
         self.removed_unrealistic_date: int = 0
+        self.excluded_by_keyword: int = 0
+        self.remapped_to_aif: int = 0
 
     def summary(self) -> str:
         return (
             f"Validation: {self.valid}/{self.total_input} passed | "
-            f"empty_title={self.removed_empty_title}, "
-            f"invalid_date={self.removed_invalid_date}, "
-            f"unrealistic_date={self.removed_unrealistic_date}, "
-            f"duplicates={self.removed_duplicates}"
+            f"excluded={self.excluded_by_keyword}, "
+            f"remapped_AIF={self.remapped_to_aif}, "
+            f"duplicates={self.removed_duplicates}, "
+            f"empty_title={self.removed_empty_title}"
         )
 
 
 async def validate_announcements(
     extraction: ExtractionResult,
+    base_category: str = "SEBI",
 ) -> tuple[list[Announcement], ValidationStats]:
     """
     Validate and clean a list of extracted announcements.
@@ -50,9 +53,11 @@ async def validate_announcements(
     2. Date is valid and realistic
     3. No exact duplicates (by title + date)
     4. Confidence adjustments based on data quality
+    5. Dynamic category remapping (e.g. SEBI -> AIF)
 
     Args:
         extraction: The raw ExtractionResult from the extractor agent.
+        base_category: The initial category (e.g. "SEBI", "RBI").
 
     Returns:
         Tuple of (validated announcements, validation statistics).
@@ -70,32 +75,53 @@ async def validate_announcements(
 
     for ann in extraction.announcements:
         # 1. Title validation
-        if not _is_valid_title(ann.title):
+        title = ann.title.strip()
+        if not _is_valid_title(title):
             stats.removed_empty_title += 1
-            logger.debug("Removed (empty/invalid title): %s", ann.title[:50])
             continue
 
-        # 2. Date realism check
+        # 2. Keyword Exclusion
+        is_excluded = False
+        for kw in EXCLUDED_KEYWORDS:
+            if kw.lower() in title.lower():
+                logger.info("Excluding announcement due to keyword '%s': %s", kw, title)
+                is_excluded = True
+                break
+        
+        if is_excluded:
+            stats.excluded_by_keyword += 1
+            continue
+
+        # 3. Date realism check
         if not _is_realistic_date(ann.issue_date, min_date, max_date):
             stats.removed_unrealistic_date += 1
-            logger.debug(
-                "Removed (unrealistic date %s): %s",
-                ann.issue_date,
-                ann.title[:50],
-            )
             continue
 
-        # 3. Duplicate check
-        dedup_key = (_normalise_title(ann.title), ann.issue_date)
+        # 4. Duplicate check
+        dedup_key = (_normalise_title(title), ann.issue_date)
         if dedup_key in seen:
             stats.removed_duplicates += 1
-            logger.debug("Removed (duplicate): %s", ann.title[:50])
             continue
         seen.add(dedup_key)
 
-        # 4. Confidence adjustment
+        # 5. Dynamic Category Mapping (Source-agnostic logic)
+        category = base_category
+        
+        # Only SEBI -> AIF remapping for now
+        if base_category == "SEBI":
+            for kw in AIF_KEYWORDS:
+                if kw.lower() in title.lower():
+                    logger.info("Mapping vertical to AIF due to keyword '%s': %s", kw, title)
+                    category = "AIF"
+                    stats.remapped_to_aif += 1
+                    break
+
+        # 6. Confidence adjustment and final object creation
         adjusted_confidence = _adjust_confidence(ann)
-        validated_ann = ann.model_copy(update={"confidence": adjusted_confidence})
+        validated_ann = ann.model_copy(update={
+            "confidence": adjusted_confidence,
+            "category": category
+        })
 
         validated.append(validated_ann)
         stats.valid += 1
@@ -132,7 +158,7 @@ def _adjust_confidence(ann: Announcement) -> float:
     Adjust the confidence score based on heuristic quality signals.
 
     Boosts:
-    - Title contains 'SEBI' or regulatory keywords
+    - Title contains regulatory keywords (domain-agnostic)
     - Date is recent
 
     Penalties:
@@ -147,11 +173,18 @@ def _adjust_confidence(ann: Announcement) -> float:
     elif len(ann.title) > 50:
         score = min(score * 1.05, 1.0)
 
-    # Regulatory keyword boost
-    regulatory_keywords = {"sebi", "circular", "regulation", "amendment", "notification"}
+    # Regulatory keyword boost (broadened)
+    regulatory_keywords = {
+        "sebi", "rbi", "nse", "bse", "circular", "regulation", 
+        "amendment", "notification", "master direction", "guideline"
+    }
     title_lower = ann.title.lower()
     if any(kw in title_lower for kw in regulatory_keywords):
         score = min(score * 1.1, 1.0)
+    
+    # Category match boost
+    if ann.category and ann.category.lower() in title_lower:
+        score = min(score * 1.05, 1.0)
 
     # Recency check
     days_old = (date.today() - ann.issue_date).days
